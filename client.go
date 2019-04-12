@@ -33,6 +33,7 @@ func (c Client) Reduce(key string, values <-chan string, output chan<- Pair) err
 	defer close(output)
 	count := 0
 	for v := range values {
+		fmt.Println("reduce client value: " + v)
 		i, err := strconv.Atoi(v)
 		if err != nil {
 			return err
@@ -40,6 +41,7 @@ func (c Client) Reduce(key string, values <-chan string, output chan<- Pair) err
 		count += i
 	}
 	p := Pair{Key: key, Value: strconv.Itoa(count)}
+	fmt.Printf("reduce client putting pair in output. Pair key: %v value: %v\n", p.Key, p.Value)
 	output <- p
 	return nil
 }
@@ -48,7 +50,7 @@ func main() {
 	runtime.GOMAXPROCS(1)
 
 	m := 9
-	r := 3
+	r := 1
 
 	tempdir := "data/"
 

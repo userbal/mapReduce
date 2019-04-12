@@ -111,61 +111,92 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 	log.Printf("map tasks processed %v pairs, generated %v pairs", pairsProcessed, pairsGenerated)
 	return nil
 }
+func launchReduceGoRoutines(values chan string, finished chan error, key string, client Interface, outputDB *sql.DB) {
+	output := make(chan Pair)
+	go client.Reduce(key, values, output)
+	pair := <-output
+	log.Printf("go3 recieved from output value: %v\n", pair.Value)
+
+	tx, err := outputDB.Begin()
+	if err != nil {
+		finished <- err
+	}
+	_, err = tx.Exec("insert into pairs(key, value) values(?, ?)", pair.Key, pair.Value)
+	if err != nil {
+		finished <- err
+	}
+	tx.Commit()
+	log.Printf("inserted %v, %v into output\n", pair.Key, pair.Value)
+	finished <- nil
+}
 
 func (task *ReduceTask) Process(tempdir string, client Interface) error {
 	//jobs:
 	//1. create input database by merging all of the apporpiate output databases from the map phase
+	log.Println("1")
 	inputDB, err := mergeDatabases(task.SourceHosts, tempdir+reduceInputFile(task.N), tempdir+"temp.sqlite3")
+	defer inputDB.Close()
 
+	log.Println("2")
 	//2. create the output database
 	outputDB, err := createDatabase(tempdir + reduceOutputFile(task.N))
 	if err != nil {
 		return err
 	}
-	inputDB.Close()
-	outputDB.Close()
+	log.Println("3")
+	defer outputDB.Close()
 
-	//	//3. process all pairs in the correct order. This is trickier than in the map phase Use this query:
-	//	rows, err := db.Query("select key, value from pairs order by key, value")
-	//	if err != nil {
-	//		return err
-	//	}
-	//
-	//	var key string
-	//	var value string
-	//	for rows.Next() {
-	//		err = rows.Scan(&key, &value)
-	//		if err != nil {
-	//			log.Printf("key error")
-	//		}
-	//		client.Reduce(key, value, c)
-	//		//insert pairs sent back through the output database
-	//
-	//		read := make(chan Pair)
-	//		write := make(chan Pair)
-	//		pKey := ""
-	//		go func (){
-	//		for pair := range c {
-	//			if pair.Key != pKey && pKey != "" {
-	//				close(c)
-	//			}
-	//
-	//			db, err := openDatabase(mapOutputFile(task.M, r))
-	//			if err != nil {
-	//				return err
-	//			}
-	//			tx, err := db.Begin()
-	//			if err != nil {
-	//				return err
-	//			}
-	//			_, err = tx.Exec("insert into pairs(key, value) values(?, ?)", pair.Key, pair.Value)
-	//			if err != nil {
-	//				return err
-	//			}
-	//			tx.Commit()
-	//			db.Close()
-	//		}()
-	//		}
-	//	}
+	log.Println("4")
+	//3. process all pairs in the correct order. This is trickier than in the map phase Use this query:
+	rows, err := inputDB.Query("select key, value from pairs order by key, value")
+	if err != nil {
+		return err
+	}
+
+	log.Println("5")
+	var key string
+	var value string
+	x := 0
+
+	log.Println("6")
+	pKey := ""
+	log.Println("7")
+	Values := make(chan string)
+	Finished := make(chan error)
+	for rows.Next() {
+		err = rows.Scan(&key, &value)
+		if err != nil {
+			log.Printf("key error")
+		}
+		log.Println("8")
+
+		log.Println("9")
+		if key != pKey && pKey != "" {
+			pKey = key
+			close(Values)
+			log.Println("closed channel")
+			err = <-Finished
+			log.Println("recieved finished signal")
+			if err != nil {
+				log.Fatal(err)
+			}
+			close(Finished)
+			Values = make(chan string)
+			Finished = make(chan error)
+			go launchReduceGoRoutines(Values, Finished, pKey, client, outputDB)
+			log.Println("launched go routines", x)
+			x++
+		} else if pKey == "" {
+			log.Println("10")
+			pKey = key
+			go launchReduceGoRoutines(Values, Finished, pKey, client, outputDB)
+			log.Println("launched go routines", x)
+			x++
+		}
+		log.Println("sent value through values channel")
+		Values <- value
+
+	}
+
 	return nil
 }
