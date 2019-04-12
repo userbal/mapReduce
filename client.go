@@ -4,8 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode"
@@ -46,32 +45,54 @@ func (c Client) Reduce(key string, values <-chan string, output chan<- Pair) err
 }
 
 func main() {
+	runtime.GOMAXPROCS(1)
+
 	m := 9
 	r := 3
-	client := Client{}
 
-	tempdir := filepath.Join(os.TempDir(), fmt.Sprintf("mapreduce.%d", os.Getpid()))
-	defer os.RemoveAll(tempdir)
+	tempdir := "data/"
 
 	go func() {
-		tempdir := "data"
 		address := "localhost:8080"
-		http.Handle("/data/", http.StripPrefix("/data", http.FileServer(http.Dir(tempdir))))
+		http.Handle("/data/", http.StripPrefix("/data", http.FileServer(http.Dir("data"))))
 		if err := http.ListenAndServe(address, nil); err != nil {
 			log.Printf("Error in HTTP server for %s: %v", address, err)
 		}
 	}()
 
-	splitDatabase("austen.sqlite3", "output-%d.sqlite3", m)
+	_, err := splitDatabase("austen.sqlite3", "data/map_%d_source.sqlite3", m)
+	if err != nil {
+		log.Fatal(err)
+	}
 
+	client := Client{}
 	for i := 0; i < m; i++ {
-
+		fmt.Println("Starting map task", i)
 		mapTask := new(MapTask)
 		mapTask.M = m
 		mapTask.R = r
 		mapTask.N = i
-		mapTask.SourceHost = "http://localhost:8080/"
+		mapTask.SourceHost = "localhost:8080"
 		mapTask.Process(tempdir, client)
+	}
+
+	var source []string
+	source = append(source, "http://localhost:8080/data/map_%d_output_0.sqlite3")
+	source = append(source, "http://localhost:8080/data/map_%d_output_1.sqlite3")
+	source = append(source, "http://localhost:8080/data/map_%d_output_2.sqlite3")
+	for i := 0; i < r; i++ {
+		fmt.Println("Starting reduce task", i)
+		reduceTask := new(ReduceTask)
+		reduceTask.M = m
+		reduceTask.R = r
+		reduceTask.N = i
+		var source2 []string
+		for _, elt := range source {
+			source2 = append(source2, fmt.Sprintf(elt, i))
+		}
+		reduceTask.SourceHosts = source2
+		reduceTask.Process(tempdir, client)
+
 	}
 
 }

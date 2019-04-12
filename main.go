@@ -13,6 +13,7 @@ import (
 )
 
 func openDatabase(path string) (*sql.DB, error) {
+	log.Println("opening database: " + path)
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		log.Fatal(err)
@@ -42,6 +43,7 @@ func openDatabase(path string) (*sql.DB, error) {
 }
 
 func createDatabase(path string) (*sql.DB, error) {
+	log.Println("creating database: " + path)
 
 	os.Remove(path)
 
@@ -81,6 +83,7 @@ func createDatabase(path string) (*sql.DB, error) {
 }
 
 func splitDatabase(source, outputPattern string, m int) ([]string, error) {
+	log.Println("splitting database, source = " + source)
 	// example call: paths, err := splitDatabase("input.sqlite3", "output-%d.sqlite3", 50)
 
 	var partitionNames []string
@@ -91,14 +94,12 @@ func splitDatabase(source, outputPattern string, m int) ([]string, error) {
 	//figure out how many pairs should be in each partition
 	stmt, err := db.Prepare("select count(1) from pairs")
 	if err != nil {
-		log.Println(err)
-		return partitionNames, err
+		return nil, err
 	}
 	var nPairs int
 	err = stmt.QueryRow().Scan(&nPairs)
 	if err != nil {
-		log.Println(err)
-		return partitionNames, err
+		return nil, err
 	}
 
 	if nPairs < m {
@@ -137,9 +138,9 @@ func splitDatabase(source, outputPattern string, m int) ([]string, error) {
 			i++
 			a = 0
 			dbIN.Close()
-			x := fmt.Sprintf(outputPattern, i)
-			partitionNames = append(partitionNames, x)
-			dbIN, err = createDatabase(x)
+			i := fmt.Sprintf(outputPattern, i)
+			partitionNames = append(partitionNames, i)
+			dbIN, err = createDatabase(i)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -162,6 +163,11 @@ func splitDatabase(source, outputPattern string, m int) ([]string, error) {
 }
 
 func mergeDatabases(urls []string, path string, temp string) (*sql.DB, error) {
+	log.Println("merging database, urls = ")
+	for _, url := range urls {
+		fmt.Println("	" + url)
+	}
+	log.Println("path = " + path)
 	db, err := createDatabase(path)
 	if err != nil {
 		log.Fatal(err)
@@ -176,29 +182,30 @@ func mergeDatabases(urls []string, path string, temp string) (*sql.DB, error) {
 }
 
 func download(url, path string) error {
+	log.Printf("downloading database from: %v, saving to: %v", url, path)
 	res, err := http.Get(url)
 	if err != nil {
-		log.Println(err)
 		return err
 	}
 	defer res.Body.Close()
+	log.Printf("res.Body %v", res.Body)
 
 	tempFile, err := os.Create(path)
+	log.Printf("file created %v", path)
 	if err != nil {
-		log.Println(err)
 		return err
 	}
 	defer tempFile.Close()
 
 	_, err = io.Copy(tempFile, res.Body)
 	if err != nil {
-		log.Println(err)
 		return err
 	}
 	return nil
 }
 
 func gatherInto(db *sql.DB, path string) error {
+	log.Println("gathering into path = " + path)
 	sqlStmt := `
 	attach ? as merge
 	`

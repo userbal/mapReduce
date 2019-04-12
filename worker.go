@@ -42,20 +42,20 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 	pairsProcessed := 0
 	pairsGenerated := 0
 	//download and open input file
-	fmt.Println(task.N)
-	err := download(task.SourceHost+mapSourceFile(task.N), mapInputFile(task.N))
+	err := download(makeURL(task.SourceHost, mapSourceFile(task.N)), tempdir+mapInputFile(task.N))
 	if err != nil {
 		log.Fatal(err)
 	}
-	sourceDB, err := openDatabase(mapInputFile(task.N))
+	sourceDB, err := openDatabase(tempdir + mapInputFile(task.N))
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer sourceDB.Close()
 
 	// create output files
 	outputDBs := make([]*sql.DB, 0)
-	for r := 0; r <= task.R; r++ {
-		db, err := createDatabase(mapOutputFile(task.N, r))
+	for r := 0; r < task.R; r++ {
+		db, err := createDatabase(tempdir + mapOutputFile(task.N, r))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -67,99 +67,105 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 	if err != nil {
 		log.Fatal(err)
 	}
-	c := make(chan Pair)
-	go func() {
-		for pair := range c {
-			pairsGenerated++
-
-			hash := fnv.New32()
-			hash.Write([]byte(pair.Key))
-			r := int(hash.Sum32()) % task.R
-			tx, err := outputDBs[r].Begin()
-			if err != nil {
-				log.Fatal(err)
-			}
-			_, err = tx.Exec("insert into pairs(key, value) values(?, ?)", pair.Key, pair.Value)
-			if err != nil {
-				log.Fatal(err)
-			}
-			tx.Commit()
-
-		}
-	}()
 
 	var key string
 	var value string
 	for rows.Next() {
-		pairsProcessed++
+		c := make(chan Pair)
+		finished := make(chan error)
+		go func() {
+			for pair := range c {
+				pairsGenerated++
+
+				hash := fnv.New32()
+				hash.Write([]byte(pair.Key))
+				r := int(hash.Sum32()) % task.R
+				tx, err := outputDBs[r].Begin()
+				if err != nil {
+					log.Fatal(err)
+				}
+				_, err = tx.Exec("insert into pairs(key, value) values(?, ?)", pair.Key, pair.Value)
+				if err != nil {
+					fmt.Errorf("Insert failed in map inserts %e", err)
+				}
+				tx.Commit()
+
+			}
+			finished <- err
+		}()
 		err = rows.Scan(&key, &value)
 		if err != nil {
 			log.Printf("key error")
 		}
 
+		pairsProcessed++
 		client.Map(key, value, c)
+		// wait for err to come  back
+		err = <-finished
 		//insert pairs sent back through the output database
-		sourceDB.Close()
 	}
 	for _, elt := range outputDBs {
 		elt.Close()
 	}
-	close(c)
-	log.Printf("map taks processed %v pairs, generated %v pairs", pairsProcessed, pairsGenerated)
+
+	log.Printf("map tasks processed %v pairs, generated %v pairs", pairsProcessed, pairsGenerated)
 	return nil
 }
 
-//func (task *ReduceTask) Process(tempdir string, client Interface) error {
-//	//jobs:
-//	//1. create input database by merging all of the apporpiate output databases from the map phase
-//	inputDB, err := mergeDatabases(task.SourceHosts, reduceInputFile(task.R), tempdir+"temp.sqlite3")
-//
-//	//2. create the output database
-//	outputDB, err := createDatabase(reduceOutputFile(task.R))
-//	if err != nil {
-//		return err
-//	}
-//
-//	//3. process all pairs in the correct order. This is trickier than in the map phase Use this query:
-//	rows, err := db.Query("select key, value from pairs order by key, value")
-//	if err != nil {
-//		return err
-//	}
-//
-//	var key string
-//	var value string
-//	for rows.Next() {
-//		err = rows.Scan(&key, &value)
-//		if err != nil {
-//			log.Printf("key error")
-//		}
-//		client.Reduce(key, value, c)
-//		//insert pairs sent back through the output database
-//
-//		read := make(chan Pair)
-//		write := make(chan Pair)
-//		pKey := ""
-//		go func (){
-//		for pair := range c {
-//			if pair.Key != pKey && pKey != "" {
-//				close(c)
-//			}
-//
-//			db, err := openDatabase(mapOutputFile(task.M, r))
-//			if err != nil {
-//				return err
-//			}
-//			tx, err := db.Begin()
-//			if err != nil {
-//				return err
-//			}
-//			_, err = tx.Exec("insert into pairs(key, value) values(?, ?)", pair.Key, pair.Value)
-//			if err != nil {
-//				return err
-//			}
-//			tx.Commit()
-//			db.Close()
-//		}()
-//		}
-//	}
-//}
+func (task *ReduceTask) Process(tempdir string, client Interface) error {
+	//jobs:
+	//1. create input database by merging all of the apporpiate output databases from the map phase
+	inputDB, err := mergeDatabases(task.SourceHosts, tempdir+reduceInputFile(task.N), tempdir+"temp.sqlite3")
+
+	//2. create the output database
+	outputDB, err := createDatabase(tempdir + reduceOutputFile(task.N))
+	if err != nil {
+		return err
+	}
+	inputDB.Close()
+	outputDB.Close()
+
+	//	//3. process all pairs in the correct order. This is trickier than in the map phase Use this query:
+	//	rows, err := db.Query("select key, value from pairs order by key, value")
+	//	if err != nil {
+	//		return err
+	//	}
+	//
+	//	var key string
+	//	var value string
+	//	for rows.Next() {
+	//		err = rows.Scan(&key, &value)
+	//		if err != nil {
+	//			log.Printf("key error")
+	//		}
+	//		client.Reduce(key, value, c)
+	//		//insert pairs sent back through the output database
+	//
+	//		read := make(chan Pair)
+	//		write := make(chan Pair)
+	//		pKey := ""
+	//		go func (){
+	//		for pair := range c {
+	//			if pair.Key != pKey && pKey != "" {
+	//				close(c)
+	//			}
+	//
+	//			db, err := openDatabase(mapOutputFile(task.M, r))
+	//			if err != nil {
+	//				return err
+	//			}
+	//			tx, err := db.Begin()
+	//			if err != nil {
+	//				return err
+	//			}
+	//			_, err = tx.Exec("insert into pairs(key, value) values(?, ?)", pair.Key, pair.Value)
+	//			if err != nil {
+	//				return err
+	//			}
+	//			tx.Commit()
+	//			db.Close()
+	//		}()
+	//		}
+	//	}
+	return nil
+}
