@@ -15,6 +15,7 @@ var m int
 var r int
 var mapTasks []*MapTask
 var reduceTasks []*ReduceTask
+var reduceOutputUrls []string
 var phase int
 var nextTask int
 var tasksCompleted int
@@ -36,6 +37,7 @@ type Task struct {
 type TaskFinInfo struct {
 	TaskID     int
 	SourceHost string
+	Address    string
 }
 
 type handler func(*Work)
@@ -143,17 +145,17 @@ func worker(address string, masterAddress string, notClient Interface) {
 		}
 	}()
 	for {
-		dialGetTask(masterAddress)
+		Task := dialGetTask(masterAddress, nextTask)
 
 		if Task.MapTask != nil {
 			log.Println("processing maptask")
 			Task.MapTask.Process(tempdir, notClient)
-			dialFinished(masterAddress, id)
+			dialFinished(masterAddress, Task.TaskID, address)
 
 		} else if Task.ReduceTask != nil {
 			log.Println("processing reducetask")
 			Task.ReduceTask.Process(tempdir, notClient)
-			dialFinished(masterAddress, id)
+			dialFinished(masterAddress, Task.TaskID, address)
 		} else {
 			log.Println("sleeping 1 second")
 			time.Sleep(1000 * time.Millisecond)
@@ -162,17 +164,18 @@ func worker(address string, masterAddress string, notClient Interface) {
 	}
 }
 
-func dialFinished(masterAddress string, id int) {
+func dialFinished(masterAddress string, id int, address string) {
 
 	client, err := rpc.DialHTTP("tcp", masterAddress)
 	if err != nil {
 		log.Fatalf("rpc.DialHTTP: %v", err)
 	}
-	var TaskFinInfo *TaskFinInfo
 	var none Nothing
+	var TaskFinInfo TaskFinInfo
 	TaskFinInfo.TaskID = id
-	TaskFinInfo.TaskID = id
-	err = client.Call("Work.FinishedTask", TaskFinInfo, none)
+	TaskFinInfo.Address = address
+	TaskFinInfo.SourceHost = address
+	err = client.Call("Work.FinishedTask", TaskFinInfo, &none)
 	if err != nil {
 		log.Fatalf("Work.FinishedTask: %v", err)
 	}
@@ -182,7 +185,7 @@ func dialFinished(masterAddress string, id int) {
 	}
 }
 
-func dialGetTask(masterAddress string, id int) {
+func dialGetTask(masterAddress string, id int) *Task {
 
 	client, err := rpc.DialHTTP("tcp", masterAddress)
 	if err != nil {
@@ -190,7 +193,7 @@ func dialGetTask(masterAddress string, id int) {
 	}
 	var none Nothing
 	var Task *Task
-	err = client.Call("Work.GetTask", none, Task)
+	err = client.Call("Work.GetTask", none, &Task)
 	if err != nil {
 		log.Fatalf("Work.GetTask: %v", err)
 	}
@@ -198,17 +201,18 @@ func dialGetTask(masterAddress string, id int) {
 	if err = client.Close(); err != nil {
 		log.Fatalf("error closing the client connection: %v", err)
 	}
+	return Task
 
 }
 
-func (w Work) GetTask(Nothing, Task *Task) error {
+func (w Work) GetTask(junk *Nothing, Task *Task) error {
 	fmt.Printf("work phase:  %v nextTask:  %v tasksCompleted:  %v len(maptasks): %v len(reducetasks): %v\n", phase, nextTask, tasksCompleted, len(mapTasks), len(reduceTasks))
 	if phase == 0 {
 		fmt.Println("	1")
 		if nextTask < len(mapTasks) {
 			fmt.Println("	2")
 			Task.MapTask = mapTasks[nextTask]
-			Task.MapTask.TaskID = nextTask
+			Task.TaskID = nextTask
 			nextTask++
 			return nil
 		} else {
@@ -219,7 +223,7 @@ func (w Work) GetTask(Nothing, Task *Task) error {
 		if nextTask < len(reduceTasks) {
 			fmt.Println("	5")
 			Task.ReduceTask = reduceTasks[nextTask]
-			Task.ReduceTask.TaskID = nextTask
+			Task.TaskID = nextTask
 			nextTask += 1
 			return nil
 		}
@@ -228,26 +232,34 @@ func (w Work) GetTask(Nothing, Task *Task) error {
 	return nil
 }
 
-func (w Work) FinishedTask(TaskFinInfo *TaskFinInfo, junk *Nothing) error {
+func (w Work) FinishedTask(TaskFinInfo TaskFinInfo, reply *Nothing) error {
 	if phase == 0 {
-		if tasksCompleted < len(mapTasks) {
+		if tasksCompleted < len(mapTasks)-1 {
+			for i := 0; i < r; i++ {
+				reduceTasks[TaskFinInfo.TaskID%r].SourceHosts = append(reduceTasks[TaskFinInfo.TaskID%r].SourceHosts, "http://"+TaskFinInfo.Address+"/data/"+mapOutputFile(TaskFinInfo.TaskID, i))
+			}
 			tasksCompleted++
-			reduceTasks[TaskFinInfo.id%r].SourceHosts = append(reduceTasks[TaskFinInfo.id%r].SourceHosts, TaskFinInfo.SourceHost)
 			return nil
+		} else {
+			for i := 0; i < r; i++ {
+				reduceTasks[TaskFinInfo.TaskID%r].SourceHosts = append(reduceTasks[TaskFinInfo.TaskID%r].SourceHosts, "http://"+TaskFinInfo.Address+"/data/"+mapOutputFile(TaskFinInfo.TaskID, i))
+			}
+			phase = 1
+			nextTask = 0
+			tasksCompleted = 0
 		}
-		phase = 1
-		nextTask = 0
-		tasksCompleted = 0
-		tasksCompleted++
 
 	} else if phase == 1 {
-		if tasksCompleted >= len(reduceTasks) {
+		if tasksCompleted < len(reduceTasks)-1 {
+			reduceOutputUrls = append(reduceOutputUrls, "http://"+TaskFinInfo.Address+"/data/"+reduceOutputFile(TaskFinInfo.TaskID))
 			tasksCompleted++
 			return nil
+		} else {
+			reduceOutputUrls = append(reduceOutputUrls, "http://"+TaskFinInfo.Address+"/data/"+reduceOutputFile(TaskFinInfo.TaskID))
+			phase = 2
+			nextTask = 0
+			tasksCompleted = 0
 		}
-		phase = 2
-		nextTask = 0
-		tasksCompleted = 0
 	}
 	return nil
 }
