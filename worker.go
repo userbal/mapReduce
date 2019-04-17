@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"net/http"
+	"net/rpc"
+	"time"
 )
 
 type MapTask struct {
@@ -28,15 +31,6 @@ type Interface interface {
 	Map(key, value string, output chan<- Pair) error
 	Reduce(key string, values <-chan string, output chan<- Pair) error
 }
-
-func mapSourceFile(m int) string       { return fmt.Sprintf("map_%d_source.sqlite3", m) }
-func mapInputFile(m int) string        { return fmt.Sprintf("map_%d_input.sqlite3", m) }
-func mapOutputFile(m, r int) string    { return fmt.Sprintf("map_%d_output_%d.sqlite3", m, r) }
-func reduceInputFile(r int) string     { return fmt.Sprintf("reduce_%d_input.sqlite3", r) }
-func reduceOutputFile(r int) string    { return fmt.Sprintf("reduce_%d_output.sqlite3", r) }
-func reducePartialFile(r int) string   { return fmt.Sprintf("reduce_%d_partial.sqlite3", r) }
-func reduceTempFile(r int) string      { return fmt.Sprintf("reduce_%d_temp.sqlite3", r) }
-func makeURL(host, file string) string { return fmt.Sprintf("http://%s/data/%s", host, file) }
 
 func (task *MapTask) Process(tempdir string, client Interface) error {
 	pairsProcessed := 0
@@ -180,4 +174,79 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 	}
 
 	return nil
+}
+
+func worker(address string, masterAddress string, notClient Interface) {
+
+	tempdir := "data/"
+	go func() {
+		http.Handle("/data/", http.StripPrefix("/data", http.FileServer(http.Dir("data"))))
+		if err := http.ListenAndServe(address, nil); err != nil {
+			log.Printf("Error in HTTP server for %s: %v", address, err)
+		}
+	}()
+
+	for {
+		Task := dialGetTask(masterAddress)
+
+		if Task.Finished {
+			return
+		}
+
+		if Task.MapTask != nil {
+			log.Println("processing maptask")
+			Task.MapTask.Process(tempdir, notClient)
+			dialFinished(masterAddress, Task.TaskID, address)
+
+		} else if Task.ReduceTask != nil {
+			log.Println("processing reducetask")
+			Task.ReduceTask.Process(tempdir, notClient)
+			dialFinished(masterAddress, Task.TaskID, address)
+		} else {
+			log.Println("sleeping 1 second")
+			time.Sleep(1000 * time.Millisecond)
+
+		}
+	}
+}
+
+func dialFinished(masterAddress string, id int, address string) {
+
+	client, err := rpc.DialHTTP("tcp", masterAddress)
+	if err != nil {
+		log.Fatalf("rpc.DialHTTP: %v", err)
+	}
+	var none Nothing
+	var TaskFinInfo TaskFinInfo
+	TaskFinInfo.TaskID = id
+	TaskFinInfo.Address = address
+	TaskFinInfo.SourceHost = address
+	err = client.Call("Work.FinishedTask", TaskFinInfo, &none)
+	if err != nil {
+		log.Fatalf("Work.FinishedTask: %v", err)
+	}
+
+	if err = client.Close(); err != nil {
+		log.Fatalf("error closing the client connection: %v", err)
+	}
+}
+
+func dialGetTask(masterAddress string) *Task {
+
+	client, err := rpc.DialHTTP("tcp", masterAddress)
+	if err != nil {
+		log.Fatalf("rpc.DialHTTP: %v", err)
+	}
+	var none Nothing
+	var Task *Task
+	err = client.Call("Work.GetTask", none, &Task)
+	if err != nil {
+		log.Fatalf("Work.GetTask: %v", err)
+	}
+
+	if err = client.Close(); err != nil {
+		log.Fatalf("error closing the client connection: %v", err)
+	}
+	return Task
+
 }

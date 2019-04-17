@@ -8,30 +8,25 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
-	"time"
 )
 
 var m int
 var r int
-var mapTasks []*MapTask
-var reduceTasks []*ReduceTask
-var reduceOutputUrls []string
-var phase int
-var nextTask int
-var tasksCompleted int
 
 type Work struct {
-	mapTasks       []*MapTask
-	reduceTasks    []*ReduceTask
-	phase          int
-	nextTask       int
-	tasksCompleted int
+	mapTasks         []*MapTask
+	reduceTasks      []*ReduceTask
+	phase            int
+	nextTask         int
+	tasksCompleted   int
+	reduceOutputUrls []string
 }
 
 type Task struct {
 	MapTask    *MapTask
 	ReduceTask *ReduceTask
 	TaskID     int
+	Finished   bool
 }
 
 type TaskFinInfo struct {
@@ -109,12 +104,12 @@ func master(address string, m int, r int, sourcefile string) {
 	fmt.Printf("m: %v r: %v\n", m, r)
 	fmt.Printf("master address: %v", address)
 
-	//_, err := splitDatabase(sourcefile, "data/map_%d_source.sqlite3", m)
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
+	_, err := splitDatabase(sourcefile, "data/map_%d_source.sqlite3", m)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	Work := new(Work)
+	w := new(Work)
 
 	for i := 0; i < m; i++ {
 		mapTask := new(MapTask)
@@ -122,7 +117,7 @@ func master(address string, m int, r int, sourcefile string) {
 		mapTask.R = r
 		mapTask.N = i
 		mapTask.SourceHost = address
-		mapTasks = append(mapTasks, mapTask)
+		w.mapTasks = append(w.mapTasks, mapTask)
 	}
 
 	for i := 0; i < r; i++ {
@@ -130,150 +125,88 @@ func master(address string, m int, r int, sourcefile string) {
 		reduceTask.M = m
 		reduceTask.R = r
 		reduceTask.N = i
-		reduceTasks = append(reduceTasks, reduceTask)
+		w.reduceTasks = append(w.reduceTasks, reduceTask)
 	}
-	server(Work, address)
-}
-
-func worker(address string, masterAddress string, notClient Interface) {
-	tempdir := "data/"
-
-	go func() {
-		http.Handle("/data/", http.StripPrefix("/data", http.FileServer(http.Dir("data"))))
-		if err := http.ListenAndServe(address, nil); err != nil {
-			log.Printf("Error in HTTP server for %s: %v", address, err)
-		}
-	}()
-	for {
-		Task := dialGetTask(masterAddress, nextTask)
-
-		if Task.MapTask != nil {
-			log.Println("processing maptask")
-			Task.MapTask.Process(tempdir, notClient)
-			dialFinished(masterAddress, Task.TaskID, address)
-
-		} else if Task.ReduceTask != nil {
-			log.Println("processing reducetask")
-			Task.ReduceTask.Process(tempdir, notClient)
-			dialFinished(masterAddress, Task.TaskID, address)
-		} else {
-			log.Println("sleeping 1 second")
-			time.Sleep(1000 * time.Millisecond)
-
-		}
-	}
-}
-
-func dialFinished(masterAddress string, id int, address string) {
-
-	client, err := rpc.DialHTTP("tcp", masterAddress)
-	if err != nil {
-		log.Fatalf("rpc.DialHTTP: %v", err)
-	}
-	var none Nothing
-	var TaskFinInfo TaskFinInfo
-	TaskFinInfo.TaskID = id
-	TaskFinInfo.Address = address
-	TaskFinInfo.SourceHost = address
-	err = client.Call("Work.FinishedTask", TaskFinInfo, &none)
-	if err != nil {
-		log.Fatalf("Work.FinishedTask: %v", err)
-	}
-
-	if err = client.Close(); err != nil {
-		log.Fatalf("error closing the client connection: %v", err)
-	}
-}
-
-func dialGetTask(masterAddress string, id int) *Task {
-
-	client, err := rpc.DialHTTP("tcp", masterAddress)
-	if err != nil {
-		log.Fatalf("rpc.DialHTTP: %v", err)
-	}
-	var none Nothing
-	var Task *Task
-	err = client.Call("Work.GetTask", none, &Task)
-	if err != nil {
-		log.Fatalf("Work.GetTask: %v", err)
-	}
-
-	if err = client.Close(); err != nil {
-		log.Fatalf("error closing the client connection: %v", err)
-	}
-	return Task
+	server(w, address)
 
 }
 
-func (w Work) GetTask(junk *Nothing, Task *Task) error {
-	fmt.Printf("work phase:  %v nextTask:  %v tasksCompleted:  %v len(maptasks): %v len(reducetasks): %v\n", phase, nextTask, tasksCompleted, len(mapTasks), len(reduceTasks))
-	if phase == 0 {
-		fmt.Println("	1")
-		if nextTask < len(mapTasks) {
-			fmt.Println("	2")
-			Task.MapTask = mapTasks[nextTask]
-			Task.TaskID = nextTask
-			nextTask++
+func (w *Work) GetTask(junk *Nothing, Task *Task) error {
+	fmt.Printf("work phase:  %v nextTask:  %v tasksCompleted:  %v len(maptasks): %v len(reducetasks): %v\n", w.phase, w.nextTask, w.tasksCompleted, len(w.mapTasks), len(w.reduceTasks))
+	switch w.phase {
+	case 0:
+		if w.nextTask < len(w.mapTasks) {
+			Task.MapTask = w.mapTasks[w.nextTask]
+			Task.TaskID = w.nextTask
+			w.nextTask++
 			return nil
 		} else {
 
 		}
-	} else if phase == 1 {
-		fmt.Println("	4")
-		if nextTask < len(reduceTasks) {
-			fmt.Println("	5")
-			Task.ReduceTask = reduceTasks[nextTask]
-			Task.TaskID = nextTask
-			nextTask += 1
+	case 1:
+		if w.nextTask < len(w.reduceTasks) {
+			Task.ReduceTask = w.reduceTasks[w.nextTask]
+			Task.TaskID = w.nextTask
+			w.nextTask += 1
 			return nil
 		}
+
+	case 2:
+		Task.Finished = true
 	}
-	fmt.Println("	6")
 	return nil
 }
 
-func (w Work) FinishedTask(TaskFinInfo TaskFinInfo, reply *Nothing) error {
-	if phase == 0 {
-		if tasksCompleted < len(mapTasks)-1 {
+func (w *Work) FinishedTask(TaskFinInfo TaskFinInfo, reply *Nothing) error {
+	switch w.phase {
+	case 0:
+		if w.tasksCompleted < len(w.mapTasks)-1 {
 			for i := 0; i < r; i++ {
-				reduceTasks[TaskFinInfo.TaskID%r].SourceHosts = append(reduceTasks[TaskFinInfo.TaskID%r].SourceHosts, "http://"+TaskFinInfo.Address+"/data/"+mapOutputFile(TaskFinInfo.TaskID, i))
+				w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts = append(w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts, "http://"+TaskFinInfo.Address+"/data/"+mapOutputFile(TaskFinInfo.TaskID, i))
 			}
-			tasksCompleted++
+			w.tasksCompleted++
 			return nil
 		} else {
 			for i := 0; i < r; i++ {
-				reduceTasks[TaskFinInfo.TaskID%r].SourceHosts = append(reduceTasks[TaskFinInfo.TaskID%r].SourceHosts, "http://"+TaskFinInfo.Address+"/data/"+mapOutputFile(TaskFinInfo.TaskID, i))
+				w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts = append(w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts, "http://"+TaskFinInfo.Address+"/data/"+mapOutputFile(TaskFinInfo.TaskID, i))
 			}
-			phase = 1
-			nextTask = 0
-			tasksCompleted = 0
+			w.phase = 1
+			w.nextTask = 0
+			w.tasksCompleted = 0
 		}
 
-	} else if phase == 1 {
-		if tasksCompleted < len(reduceTasks)-1 {
-			reduceOutputUrls = append(reduceOutputUrls, "http://"+TaskFinInfo.Address+"/data/"+reduceOutputFile(TaskFinInfo.TaskID))
-			tasksCompleted++
+	case 1:
+		if w.tasksCompleted < len(w.reduceTasks) {
+			w.reduceOutputUrls = append(w.reduceOutputUrls, "http://"+TaskFinInfo.Address+"/data/"+reduceOutputFile(TaskFinInfo.TaskID))
+			w.tasksCompleted++
 			return nil
 		} else {
-			reduceOutputUrls = append(reduceOutputUrls, "http://"+TaskFinInfo.Address+"/data/"+reduceOutputFile(TaskFinInfo.TaskID))
-			phase = 2
-			nextTask = 0
-			tasksCompleted = 0
+			w.reduceOutputUrls = append(w.reduceOutputUrls, "http://"+TaskFinInfo.Address+"/data/"+reduceOutputFile(TaskFinInfo.TaskID))
+			w.phase = 2
+			fmt.Println(w.reduceOutputUrls)
+			inputDB, err := mergeDatabases(w.reduceOutputUrls, "data/final.sqlite3", "data/temp.sqlite3")
+			if err != nil {
+				log.Fatalf("final merge %v", err)
+			}
+			defer inputDB.Close()
 		}
 	}
 	return nil
 }
 
-func server(Work *Work, address string) {
+func server(w *Work, address string) {
 
 	fmt.Println(address)
 
-	rpc.Register(Work)
+	rpc.Register(w)
 	rpc.HandleHTTP()
 
 	http.Handle("/data/", http.StripPrefix("/data", http.FileServer(http.Dir("data"))))
 	if err := http.ListenAndServe(address, nil); err != nil {
 		log.Printf("Error in HTTP server for %s: %v", address, err)
+	}
+
+	if w.phase == 2 {
 	}
 
 }

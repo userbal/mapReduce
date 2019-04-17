@@ -237,3 +237,12 @@ func gatherInto(db *sql.DB, path string) error {
 	os.Remove(path)
 	return nil
 }
+
+func mapSourceFile(m int) string       { return fmt.Sprintf("map_%d_source.sqlite3", m) }
+func mapInputFile(m int) string        { return fmt.Sprintf("map_%d_input.sqlite3", m) }
+func mapOutputFile(m, r int) string    { return fmt.Sprintf("map_%d_output_%d.sqlite3", m, r) }
+func reduceInputFile(r int) string     { return fmt.Sprintf("reduce_%d_input.sqlite3", r) }
+func reduceOutputFile(r int) string    { return fmt.Sprintf("reduce_%d_output.sqlite3", r) }
+func reducePartialFile(r int) string   { return fmt.Sprintf("reduce_%d_partial.sqlite3", r) }
+func reduceTempFile(r int) string      { return fmt.Sprintf("reduce_%d_temp.sqlite3", r) }
+func makeURL(host, file string) string { return fmt.Sprintf("http://%s/data/%s", host, file) }
