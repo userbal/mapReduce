@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"net/rpc"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -61,6 +63,7 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer rows.Close()
 
 	var key string
 	var value string
@@ -105,6 +108,7 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 	log.Printf("map tasks processed %v pairs, generated %v pairs", pairsProcessed, pairsGenerated)
 	return nil
 }
+
 func launchReduceGoRoutines(values chan string, finished chan error, key string, client Interface, outputDB *sql.DB) {
 	output := make(chan Pair)
 	go client.Reduce(key, values, output)
@@ -141,6 +145,7 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 
 	var key string
 	var value string
@@ -178,9 +183,11 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 
 func worker(address string, masterAddress string, notClient Interface) {
 
-	tempdir := "data/"
+	tempdir := filepath.Join(os.TempDir(), fmt.Sprintf("mapreduce.%d", os.Getpid()))
+	os.Mkdir(tempdir, 755)
+	//tempdir := "data/"
 	go func() {
-		http.Handle("/data/", http.StripPrefix("/data", http.FileServer(http.Dir("data"))))
+		http.Handle(tempdir+"/", http.StripPrefix(tempdir, http.FileServer(http.Dir(tempdir))))
 		if err := http.ListenAndServe(address, nil); err != nil {
 			log.Printf("Error in HTTP server for %s: %v", address, err)
 		}
@@ -195,22 +202,25 @@ func worker(address string, masterAddress string, notClient Interface) {
 
 		if Task.MapTask != nil {
 			log.Println("processing maptask")
-			Task.MapTask.Process(tempdir, notClient)
-			dialFinished(masterAddress, Task.TaskID, address)
+			Task.MapTask.Process(tempdir+"/", notClient)
+			dialFinished(masterAddress, Task.TaskID, address, tempdir+"/")
 
 		} else if Task.ReduceTask != nil {
 			log.Println("processing reducetask")
-			Task.ReduceTask.Process(tempdir, notClient)
-			dialFinished(masterAddress, Task.TaskID, address)
+			Task.ReduceTask.Process(tempdir+"/", notClient)
+			dialFinished(masterAddress, Task.TaskID, address, tempdir+"/")
 		} else {
 			log.Println("sleeping 1 second")
 			time.Sleep(1000 * time.Millisecond)
 
 		}
 	}
+	log.Printf("cleaning up\n")
+	os.RemoveAll(tempdir)
+	os.Exit(0)
 }
 
-func dialFinished(masterAddress string, id int, address string) {
+func dialFinished(masterAddress string, id int, address string, tempdir string) {
 
 	client, err := rpc.DialHTTP("tcp", masterAddress)
 	if err != nil {
@@ -221,6 +231,7 @@ func dialFinished(masterAddress string, id int, address string) {
 	TaskFinInfo.TaskID = id
 	TaskFinInfo.Address = address
 	TaskFinInfo.SourceHost = address
+	TaskFinInfo.Directory = tempdir
 	err = client.Call("Work.FinishedTask", TaskFinInfo, &none)
 	if err != nil {
 		log.Fatalf("Work.FinishedTask: %v", err)

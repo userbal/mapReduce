@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"os"
 
@@ -13,7 +12,6 @@ import (
 )
 
 func openDatabase(path string) (*sql.DB, error) {
-	log.Println("opening database: " + path)
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		log.Fatal(err)
@@ -43,7 +41,6 @@ func openDatabase(path string) (*sql.DB, error) {
 }
 
 func createDatabase(path string) (*sql.DB, error) {
-	log.Println("creating database: " + path)
 
 	os.Remove(path)
 
@@ -83,13 +80,23 @@ func createDatabase(path string) (*sql.DB, error) {
 }
 
 func splitDatabase(source, outputPattern string, m int) ([]string, error) {
-	log.Println("splitting database, source = " + source)
 	// example call: paths, err := splitDatabase("input.sqlite3", "output-%d.sqlite3", 50)
 
 	var partitionNames []string
+	var partitions []*sql.DB
 
 	//opening source
 	db, err := openDatabase(source)
+
+	for i := 0; i < m; i++ {
+		path := fmt.Sprintf(outputPattern, i)
+		partitionNames = append(partitionNames, path)
+		partition, err := createDatabase(path)
+		if err != nil {
+			log.Fatal(err)
+		}
+		partitions = append(partitions, partition)
+	}
 
 	//figure out how many pairs should be in each partition
 	stmt, err := db.Prepare("select count(1) from pairs")
@@ -105,9 +112,6 @@ func splitDatabase(source, outputPattern string, m int) ([]string, error) {
 	if nPairs < m {
 		log.Fatal("you must request fewer partitions than rows, (split database)")
 	}
-	x := float64(nPairs)/float64(m) + 0.5
-	x = math.Floor(x)
-	rowsPerPartition := int(x)
 
 	//insert rows into partitions
 	rows, err := db.Query("select key, value from pairs")
@@ -115,36 +119,12 @@ func splitDatabase(source, outputPattern string, m int) ([]string, error) {
 		log.Fatal(err)
 	}
 
-	var dbIN *sql.DB
-	path := fmt.Sprintf(outputPattern, 0)
-	partitionNames = append(partitionNames, path)
-	dbIN, err = createDatabase(path)
-	if err != nil {
-		log.Fatal(err)
-	}
-	//database
-	i := 0
-	//rows inserted
-	a := 0
+	var key string
+	var value string
+	j := 0
 	for rows.Next() {
-		var key string
-		var value string
 		err = rows.Scan(&key, &value)
-		if err != nil {
-			log.Printf("key error")
-		}
-
-		if a >= rowsPerPartition && i < m-1 {
-			i++
-			a = 0
-			dbIN.Close()
-			i := fmt.Sprintf(outputPattern, i)
-			partitionNames = append(partitionNames, i)
-			dbIN, err = createDatabase(i)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
+		dbIN := partitions[j]
 
 		tx, err := dbIN.Begin()
 		if err != nil {
@@ -155,7 +135,12 @@ func splitDatabase(source, outputPattern string, m int) ([]string, error) {
 			log.Fatal(err)
 		}
 		tx.Commit()
-		a++
+
+		if j >= m-1 {
+			j = 0
+		} else {
+			j++
+		}
 	}
 
 	stmt.Close()
@@ -163,19 +148,20 @@ func splitDatabase(source, outputPattern string, m int) ([]string, error) {
 }
 
 func mergeDatabases(urls []string, path string, temp string) (*sql.DB, error) {
-	log.Println("merging database, urls = ")
-	for _, url := range urls {
-		fmt.Println("	" + url)
-	}
-	log.Println("path = " + path)
 	db, err := createDatabase(path)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	for _, url := range urls {
-		download(url, temp)
-		gatherInto(db, temp)
+		err = download(url, temp)
+		if err != nil {
+			log.Printf("download failed, path: %v", path)
+		}
+		err = gatherInto(db, temp)
+		if err != nil {
+			log.Printf("gatherinto failed, path: %v", path)
+		}
 		os.Remove(temp)
 	}
 	return db, nil
@@ -183,15 +169,14 @@ func mergeDatabases(urls []string, path string, temp string) (*sql.DB, error) {
 
 func download(url, path string) error {
 	log.Printf("downloading database from: %v, saving to: %v", url, path)
+
 	res, err := http.Get(url)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	log.Printf("res.Body %v", res.Body)
 
 	tempFile, err := os.Create(path)
-	log.Printf("file created %v", path)
 	if err != nil {
 		return err
 	}
@@ -205,11 +190,9 @@ func download(url, path string) error {
 }
 
 func gatherInto(db *sql.DB, path string) error {
-	log.Println("gathering into path = " + path)
 	sqlStmt := `
 	attach ? as merge
 	`
-	fmt.Println(path)
 	_, err := db.Exec(sqlStmt, path)
 	if err != nil {
 		log.Printf("%q: %s\n", err, sqlStmt)

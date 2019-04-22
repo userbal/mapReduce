@@ -8,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
+	"sync"
 )
 
 var m int
@@ -20,6 +21,7 @@ type Work struct {
 	nextTask         int
 	tasksCompleted   int
 	reduceOutputUrls []string
+	Mux              sync.Mutex
 }
 
 type Task struct {
@@ -33,6 +35,7 @@ type TaskFinInfo struct {
 	TaskID     int
 	SourceHost string
 	Address    string
+	Directory  string
 }
 
 type handler func(*Work)
@@ -84,10 +87,8 @@ func Start(client Interface) error {
 
 	if isMaster {
 		master(address, m, r, sourcefile)
-		fmt.Printf("address %v m %v r %v sourcefile %v\n", address, m, r, sourcefile)
 	} else {
 		worker(address, masteraddress, client)
-		fmt.Printf("address %v masteraddress %v\n", address, masteraddress)
 	}
 	return err
 }
@@ -101,8 +102,7 @@ func printUsage() {
 }
 
 func master(address string, m int, r int, sourcefile string) {
-	fmt.Printf("m: %v r: %v\n", m, r)
-	fmt.Printf("master address: %v", address)
+	fmt.Println("Setting Up")
 
 	_, err := splitDatabase(sourcefile, "data/map_%d_source.sqlite3", m)
 	if err != nil {
@@ -127,12 +127,16 @@ func master(address string, m int, r int, sourcefile string) {
 		reduceTask.N = i
 		w.reduceTasks = append(w.reduceTasks, reduceTask)
 	}
+	fmt.Println("Ready")
 	server(w, address)
 
 }
 
 func (w *Work) GetTask(junk *Nothing, Task *Task) error {
-	fmt.Printf("work phase:  %v nextTask:  %v tasksCompleted:  %v len(maptasks): %v len(reducetasks): %v\n", w.phase, w.nextTask, w.tasksCompleted, len(w.mapTasks), len(w.reduceTasks))
+	w.Mux.Lock()
+	defer w.Mux.Unlock()
+
+	fmt.Printf("work phase: %v  nextTask: %v  tasksCompleted: %v  len(maptasks): %v  len(reducetasks): %v\n", w.phase, w.nextTask, w.tasksCompleted, len(w.mapTasks), len(w.reduceTasks))
 	switch w.phase {
 	case 0:
 		if w.nextTask < len(w.mapTasks) {
@@ -158,17 +162,19 @@ func (w *Work) GetTask(junk *Nothing, Task *Task) error {
 }
 
 func (w *Work) FinishedTask(TaskFinInfo TaskFinInfo, reply *Nothing) error {
+	w.Mux.Lock()
+	defer w.Mux.Unlock()
 	switch w.phase {
 	case 0:
 		if w.tasksCompleted < len(w.mapTasks)-1 {
 			for i := 0; i < r; i++ {
-				w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts = append(w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts, "http://"+TaskFinInfo.Address+"/data/"+mapOutputFile(TaskFinInfo.TaskID, i))
+				w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts = append(w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts, "http://"+TaskFinInfo.Address+TaskFinInfo.Directory+mapOutputFile(TaskFinInfo.TaskID, i))
 			}
 			w.tasksCompleted++
 			return nil
 		} else {
 			for i := 0; i < r; i++ {
-				w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts = append(w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts, "http://"+TaskFinInfo.Address+"/data/"+mapOutputFile(TaskFinInfo.TaskID, i))
+				w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts = append(w.reduceTasks[TaskFinInfo.TaskID%r].SourceHosts, "http://"+TaskFinInfo.Address+TaskFinInfo.Directory+mapOutputFile(TaskFinInfo.TaskID, i))
 			}
 			w.phase = 1
 			w.nextTask = 0
@@ -176,37 +182,33 @@ func (w *Work) FinishedTask(TaskFinInfo TaskFinInfo, reply *Nothing) error {
 		}
 
 	case 1:
-		if w.tasksCompleted < len(w.reduceTasks) {
-			w.reduceOutputUrls = append(w.reduceOutputUrls, "http://"+TaskFinInfo.Address+"/data/"+reduceOutputFile(TaskFinInfo.TaskID))
+		if w.tasksCompleted < len(w.reduceTasks)-1 {
+			w.reduceOutputUrls = append(w.reduceOutputUrls, "http://"+TaskFinInfo.Address+TaskFinInfo.Directory+reduceOutputFile(TaskFinInfo.TaskID))
 			w.tasksCompleted++
 			return nil
 		} else {
-			w.reduceOutputUrls = append(w.reduceOutputUrls, "http://"+TaskFinInfo.Address+"/data/"+reduceOutputFile(TaskFinInfo.TaskID))
+			w.reduceOutputUrls = append(w.reduceOutputUrls, "http://"+TaskFinInfo.Address+TaskFinInfo.Directory+reduceOutputFile(TaskFinInfo.TaskID))
 			w.phase = 2
 			fmt.Println(w.reduceOutputUrls)
 			inputDB, err := mergeDatabases(w.reduceOutputUrls, "data/final.sqlite3", "data/temp.sqlite3")
 			if err != nil {
 				log.Fatalf("final merge %v", err)
 			}
-			defer inputDB.Close()
+			inputDB.Close()
 		}
+	case 2:
+		os.Exit(0)
 	}
 	return nil
 }
 
 func server(w *Work, address string) {
-
-	fmt.Println(address)
-
 	rpc.Register(w)
 	rpc.HandleHTTP()
 
 	http.Handle("/data/", http.StripPrefix("/data", http.FileServer(http.Dir("data"))))
 	if err := http.ListenAndServe(address, nil); err != nil {
 		log.Printf("Error in HTTP server for %s: %v", address, err)
-	}
-
-	if w.phase == 2 {
 	}
 
 }
