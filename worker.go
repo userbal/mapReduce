@@ -88,7 +88,7 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 				tx.Commit()
 
 			}
-			finished <- err
+			finished <- nil
 		}()
 		err = rows.Scan(&key, &value)
 		if err != nil {
@@ -96,9 +96,15 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 		}
 
 		pairsProcessed++
-		client.Map(key, value, c)
+		err = client.Map(key, value, c)
+		if err != nil {
+			log.Fatalf("error calling client map: %v", err)
+		}
 		// wait for err to come  back
 		err = <-finished
+		if err != nil {
+			log.Fatalf("error calling client map: %v", err)
+		}
 		//insert pairs sent back through the output database
 	}
 	for _, elt := range outputDBs {
